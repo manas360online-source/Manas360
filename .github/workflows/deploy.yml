@@ -1,0 +1,61 @@
+name: Deploy
+
+on:
+
+  push:
+
+    branches: [main, staging]
+
+jobs:
+
+  test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - uses: actions/checkout@v3
+
+      - name: Run tests
+
+        run: pytest tests/
+
+  
+
+  build:
+
+    needs: test
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Build Docker image
+
+        run: docker build -t mans360:${{ github.sha }} .
+
+      - name: Push to ECR
+
+        run: |
+
+          aws ecr get-login-password | docker login
+
+          docker push mans360:${{ github.sha }}
+
+  
+
+  deploy-staging:
+
+    needs: build
+
+    if: github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Deploy to staging
+
+        run: kubectl set image deployment/mans360 mans360=mans360:${{ github.sha }}
+
+
