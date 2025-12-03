@@ -1,15 +1,16 @@
-name: CI - Manas 360 Hospital Assistant
+name: CI/CD - Manas 360
 
 on:
-  push:
-    branches: [ main, staging ]
   pull_request:
-    branches: [ main, staging ]
+    branches: [main, staging]
+  push:
+    branches: [main, staging]
 
 jobs:
   test:
     name: Run tests
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -17,7 +18,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -30,9 +31,91 @@ jobs:
     name: Build Docker image
     needs: test
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Build Docker image
         run: docker build -t mans360:${{ github.sha }} .
+
+  deploy-staging:
+    name: Deploy to STAGING
+    needs: build
+    runs-on: ubuntu-latest
+
+    # 🔥 Only run when code is pushed to main (after merge)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+
+      - name: Deploy to staging
+        run: |
+          # In a real setup this updates the image used by the staging deployment
+          kubectl set image deployment/mans360 mans360=mans360:${{ github.sha }}
+          kubectl rollout status deployment/mans360
+
+  deploy-prod:
+    name: Deploy to PRODUCTION
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+
+    # 🔥 Only when main is updated (same as staging)
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # 🔥 Manual approval required: configure this environment in GitHub
+    environment:
+      name: production
+      url: https://your-production-url.example.com
+
+    steps:
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" > ~/.kube/config
+
+      - name: Deploy to production
+        run: |
+          kubectl set image deployment/mans360 mans360=mans360:${{ github.sha }}
+          kubectl rollout status deployment/mans360
+
+  notify:
+    name: Slack notification
+    needs: [deploy-staging, deploy-prod]
+    runs-on: ubuntu-latest
+
+    # 🔥 Run even if previous jobs failed
+    if: always()
+
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          WORKFLOW: ${{ github.workflow }}
+          BRANCH: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          STAGING_RESULT: ${{ needs.deploy-staging.result }}
+          PROD_RESULT: ${{ needs.deploy-prod.result }}
+        run: |
+          STATUS="unknown"
+          if [ "$STAGING_RESULT" = "success" ] && [ "$PROD_RESULT" = "success" ]; then
+            STATUS="✅ Staging & Prod deployment success"
+          elif [ "$STAGING_RESULT" = "success" ] && [ "$PROD_RESULT" = "skipped" ]; then
+            STATUS="✅ Staging success (Prod skipped)"
+          else
+            STATUS="❌ Deployment failed or partially failed"
+          fi
+
+          payload=$(cat <<EOF
+          {
+            "text": "*$STATUS*\nRepository: \`${{ github.repository }}\`\nBranch: \`$BRANCH\`\nCommit: \`$COMMIT\`\nWorkflow: \`$WORKFLOW\`\nStaging: \`$STAGING_RESULT\`\nProduction: \`$PROD_RESULT\`"
+          }
+          EOF
+          )
+
+          curl -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"
+
